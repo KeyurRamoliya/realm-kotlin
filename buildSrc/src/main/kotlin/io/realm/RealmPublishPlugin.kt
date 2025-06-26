@@ -93,7 +93,7 @@ class RealmPublishPlugin : Plugin<Project> {
         // empty `realm-kotlin` artifact being deployed to Maven Central.
         val isRootProject: Boolean = (project == project.rootProject)
         if (isRootProject) {
-            configureRootProject(project)
+            //configureRootProject(project)
         } else {
             configureSubProject(project, signBuild)
             configureTestRepository(project)
@@ -133,31 +133,32 @@ class RealmPublishPlugin : Plugin<Project> {
         }
     }
 
-    private fun configureRootProject(project: Project) {
-        val sonatypeStagingProfileId = "78c19333e4450f"
+//    private fun configureRootProject(project: Project) {
+//        val sonatypeStagingProfileId = "78c19333e4450f"
+//
+//        with(project) {
+//            project.plugins.apply(NexusPublishPlugin::class.java)
+//
+//            // Configure upload to Maven Central.
+//            // The nexus publisher plugin can only be applied to top-level projects.
+//            // See https://github.com/gradle-nexus/publish-plugin/issues/81
+//            extensions.getByType<NexusPublishExtension>().apply {
+//                this.packageGroup.set("io.realm.kotlin")
+//                this.repositories {
+//                    sonatype {
+//                        this.stagingProfileId.set(sonatypeStagingProfileId)
+//                        this.username.set(getPropertyValue(project,"ossrhUsername"))
+//                        this.password.set(getPropertyValue(project,"ossrhPassword"))
+//                    }
+//                }
+//                this.transitionCheckOptions {
+//                    maxRetries.set(720) // Retry for 2 hours. Sometimes Maven Central is really slow!
+//                    delayBetween.set(Duration.ofSeconds(10))
+//                }
+//            }
+//        }
+//    }
 
-        with(project) {
-            project.plugins.apply(NexusPublishPlugin::class.java)
-
-            // Configure upload to Maven Central.
-            // The nexus publisher plugin can only be applied to top-level projects.
-            // See https://github.com/gradle-nexus/publish-plugin/issues/81
-            extensions.getByType<NexusPublishExtension>().apply {
-                this.packageGroup.set("io.realm.kotlin")
-                this.repositories {
-                    sonatype {
-                        this.stagingProfileId.set(sonatypeStagingProfileId)
-                        this.username.set(getPropertyValue(project,"ossrhUsername"))
-                        this.password.set(getPropertyValue(project,"ossrhPassword"))
-                    }
-                }
-                this.transitionCheckOptions {
-                    maxRetries.set(720) // Retry for 2 hours. Sometimes Maven Central is really slow!
-                    delayBetween.set(Duration.ofSeconds(10))
-                }
-            }
-        }
-    }
 
     private fun configurePom(project: Project, options: PomOptions) {
         project.extensions.getByType<PublishingExtension>().apply {
