@@ -15,37 +15,76 @@
  * limitations under the License.
  */
 
-// buildscript is not needed for this simplified setup.
-
-// Helper function to capitalize parts of a task name
-fun taskName(subdir: String): String {
-    return subdir.split("/", "-").joinToString(separator = "") { it.replaceFirstChar { c -> c.uppercaseChar() } }
+buildscript {
+    repositories {
+        jcenter()
+    }
 }
 
-val subprojectPaths = listOf("packages", "examples/kmm-sample", "benchmarks")
+// Find property in either System environment or Gradle properties.
+// If set in both places, Gradle properties win.
+fun getPropertyValue(propertyName: String, throwIfNotFound: Boolean = false): String {
+    val value: String? = (project.findProperty(propertyName) ?: System.getenv(propertyName)) as String?
+    if (throwIfNotFound && (value == null || value.trim().isEmpty())) {
+        throw GradleException("Could not find '$propertyName'. " +
+                "Most be provided as either environment variable or " +
+                "a Gradle property.")
+    }
+    return value ?: ""
+}
+
+// Cache dir for build artifacts that should be stored on S3
+val releaseMetaDataDir = File("${buildDir}/outputs/s3")
+releaseMetaDataDir.mkdirs()
+
+fun readAndCacheVersion(): String {
+    val constants: String = File("${projectDir.absolutePath}/buildSrc/src/main/kotlin/Config.kt").readText();
+    val regex = "const val version = \"(.*?)\"".toRegex()
+    val match: MatchResult = regex.find(constants) ?: throw GradleException("Could not find current Realm version")
+    val version: String = match.groups[1]!!.value
+    val versionFile = File(releaseMetaDataDir, "version.txt")
+    versionFile.createNewFile()
+    versionFile.writeText(version)
+    return version
+}
+val currentVersion = readAndCacheVersion()
+val subprojects = listOf("packages", "examples/kmm-sample", "benchmarks")
+fun taskName(subdir: String): String {
+    return subdir.split("/", "-").map { it.capitalize() }.joinToString(separator = "")
+}
+
+fun copyProperties(action: GradleBuild) {
+    val propsToCopy = listOf("signBuild", "signPassword", "signSecretRingFileKotlin", "ossrhUsername", "ossrhPassword")
+    val project: Project = action.project
+    val buildProperties = action.startParameter.projectProperties
+    propsToCopy.forEach {
+        if (project.hasProperty(it)) {
+            buildProperties[it] = project.property(it) as String
+        }
+    }
+}
 
 tasks {
-    // These tasks are for code quality and can remain as they are useful for local
-    // development and CI, but are not directly related to publishing.
+
     register("ktlintCheck") {
         description = "Runs ktlintCheck on all projects."
         group = "Verification"
-        dependsOn(subprojectPaths.map { "ktlintCheck${taskName(it)}" })
+        dependsOn(subprojects.map { "ktlintCheck${taskName(it)}" })
     }
 
     register("ktlintFormat") {
         description = "Runs ktlintFormat on all projects."
         group = "Formatting"
-        dependsOn(subprojectPaths.map { "ktlintFormat${taskName(it)}" })
+        dependsOn(subprojects.map { "ktlintFormat${taskName(it)}" })
     }
 
     register("detekt") {
         description = "Runs detekt on all projects."
         group = "Verification"
-        dependsOn(subprojectPaths.map { "detekt${taskName(it)}" })
+        dependsOn(subprojects.map { "detekt${taskName(it)}" })
     }
 
-    subprojectPaths.forEach { subdir ->
+    subprojects.forEach { subdir ->
         register<Exec>("ktlintCheck${taskName(subdir)}") {
             description = "Run ktlintCheck on /$subdir project"
             workingDir = file("${rootDir}/$subdir")
@@ -63,18 +102,77 @@ tasks {
         }
     }
 
-    // The 'publishToMavenLocal' task is what JitPack will use to build your library.
-    // We can create an aggregator task to run it on all relevant subprojects.
-    // This makes it easy to test the build locally before pushing to GitHub.
-    register("publishToMavenLocal") {
-        description = "Publishes all library artifacts to the local Maven repository."
+    register<GradleBuild>("mavenCentralUpload") {
+        description = "Push all Realm artifacts to Maven Central"
         group = "Publishing"
-        // Add dependencies on the publishToMavenLocal tasks of the modules you want to publish.
-        // JitPack will automatically find all modules with the 'maven-publish' plugin.
-        // This is primarily for local testing.
-        dependsOn(subprojectPaths.mapNotNull { subdir ->
-            val projectPath = ":${subdir.replace('/', ':')}"
-            project(projectPath).tasks.findByName("publishToMavenLocal")
-        })
+        dir = file("${rootDir}/packages/build.gradle.kts")
+        tasks = listOf("publishToSonatype")
+        copyProperties(this)
+    }
+
+    // TODO Verify we can actually use these debug symbols
+    val archiveDebugSymbols by register("archiveDebugSymbols", Zip::class) {
+        archiveFileName.set("realm-kotlin-jni-libs-unstripped-${currentVersion}.zip")
+        destinationDirectory.set(releaseMetaDataDir)
+        from("${rootDir}/packages/cinterop/build/intermediates/merged_native_libs/release/out/lib") {
+            include("**/*.so")
+        }
+        doLast {
+            // Failsafe check, ensuring that we catch if the path ever changes, which it might since it is an
+            // implementation detail of the Android Gradle Plugin
+            val unstrippedDir = File("${rootDir}/packages/cinterop/build/intermediates/merged_native_libs/release/out/lib")
+            if (!unstrippedDir.exists() || !unstrippedDir.isDirectory || unstrippedDir.listFiles().isEmpty()) {
+                throw GradleException("Could not locate unstripped binary files in: ${unstrippedDir.path}")
+            }
+        }
+    }
+
+    // Make sure that these parameters are set before calling tasks that uses them.
+    // In Groovy we could have used an lazy evaluated GString instead, but this does
+    // seem possible in Kotlin.
+    val verifyS3Access by register("verifyS3Access", Task::class) {
+        doLast {
+            getPropertyValue("REALM_S3_ACCESS_KEY", true)
+            getPropertyValue("REALM_S3_SECRET_KEY", true)
+        }
+    }
+
+    val uploadDebugSymbols by register("uploadDebugSymbols", Task::class) {
+        dependsOn.addAll(listOf(archiveDebugSymbols, verifyS3Access))
+        doLast {
+            exec {
+                val s3AccessKey = getPropertyValue("REALM_S3_ACCESS_KEY")
+                val s3SecretKey = getPropertyValue("REALM_S3_SECRET_KEY")
+                workingDir = File("${buildDir}/outputs/s3/")
+                commandLine = listOf(
+                        "s3cmd",
+                        "--access_key=${s3AccessKey}",
+                        "--secret_key=${s3SecretKey}",
+                        "put",
+                        "realm-kotlin-jni-libs-unstripped-${currentVersion}.zip",
+                        "s3://static.realm.io/downloads/kotlin/"
+                )
+            }
+        }
+    }
+
+    val updateS3VersionFile by register("updateS3VersionFile", Exec::class) {
+        dependsOn.add(verifyS3Access)
+        val s3AccessKey = getPropertyValue("REALM_S3_ACCESS_KEY")
+        val s3SecretKey = getPropertyValue("REALM_S3_SECRET_KEY")
+        File("$buildDir/outputs/s3", "version.txt").writeText(currentVersion)
+        commandLine = listOf(
+                "s3cmd",
+                "--access_key=${s3AccessKey}",
+                "--secret_key=${s3SecretKey}",
+                "put",
+                "${buildDir}/outputs/s3/version.txt",
+                "s3://static.realm.io/update/kotlin")
+    }
+
+    register<Task>("uploadReleaseMetaData") {
+        group = "Release"
+        description = "Upload release metadata to S3 (Native debug symbols, version files)"
+        dependsOn.addAll(listOf(uploadDebugSymbols, updateS3VersionFile))
     }
 }
