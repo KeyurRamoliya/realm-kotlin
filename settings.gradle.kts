@@ -15,5 +15,24 @@
  * limitations under the License.
  */
 
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+        // Add JitPack here for plugins if needed, though often not required
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // Add JitPack here for dependencies
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+
 rootProject.name = "realm-kotlin-root"
 
